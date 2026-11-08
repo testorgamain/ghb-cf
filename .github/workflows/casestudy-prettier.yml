@@ -1,0 +1,112 @@
+# Reusable. Both callers invoke THIS file, so the measured steps exist once and
+# cannot drift apart. The only difference between a cf-container run and an
+# ubuntu-latest run is the `runner` input.
+name: casestudy-prettier
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label to race.
+        type: string
+        required: true
+      cache:
+        description: cold (no dependency cache) or warm (cache enabled).
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned, so the numbers describe one commit rather than a moving target.
+  # prettier 3.9.6.
+  UPSTREAM: prettier/prettier
+  UPSTREAM_REF: 8f0c95057cc91d5836409466cd9d9af3bb901e84
+  # Both sides install the same node rather than using whatever each image
+  # ships, which otherwise differs and is not the variable under test.
+  NODE_VERSION: 24.19.0
+
+jobs:
+  case:
+    runs-on: ${{ inputs.runner }}
+    # Upstream caps its own CI at 15 minutes on a 4-core runner. This is a
+    # runaway guard, not a budget.
+    timeout-minutes: 45
+    steps:
+      # First, because a comparison that does not record what it ran on is not
+      # reproducible. ubuntu-latest draws several different CPU models, so the
+      # model belongs next to every number.
+      - name: Record machine
+        run: |
+          echo "runner_label=${{ inputs.runner }}"
+          echo "cache_mode=${{ inputs.cache }}"
+          echo "cpu_model=$(grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
+          echo "nproc=$(nproc)"
+          echo "mem_total_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)"
+          echo "kernel=$(uname -r)"
+          df -h / | tail -1
+          # Baseline for the CPU accounting below.
+          awk '/^cpu /{print $2+$3+$4+$6+$7+$8, $5}' /proc/stat > /tmp/cpu0
+          date +%s > /tmp/t0
+
+      - name: Checkout upstream at pinned ref
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ env.UPSTREAM_REF }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # prettier pins yarn 4 through packageManager, which corepack resolves.
+      - name: Enable corepack
+        run: corepack enable
+
+      # The cache action is identical on both sides; only the backend behind it
+      # differs. On ubuntu-latest it talks to GitHub's cache service, and inside
+      # a cf-container the same requests are answered from R2. That substitution
+      # is the thing being measured, so the action must NOT be swapped for a
+      # vendor-specific one.
+      - name: Restore dependency cache
+        id: cache
+        if: inputs.cache == 'warm'
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: |
+            .yarn/cache
+            .yarn/install-state.gz
+            node_modules
+          key: prettier-${{ env.UPSTREAM_REF }}-node${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Run the upstream test suite
+        run: yarn test
+
+      # Reported by the collector so a warm run that silently missed is never
+      # counted as a warm run. actions/cache downgrades a failed save to a
+      # warning, so a miss here is easy to overlook.
+      - name: Cache outcome
+        if: always() && inputs.cache == 'warm'
+        run: echo "cache_hit=${{ steps.cache.outputs.cache-hit || 'false' }}"
+
+      # Cloudflare bills memory and disk on wall-clock but CPU on active use,
+      # so the cost of a job cannot be derived from its duration alone. This
+      # measures the busy fraction rather than assuming one.
+      - name: CPU accounting
+        if: always()
+        run: |
+          read -r busy0 idle0 < /tmp/cpu0
+          read -r busy1 idle1 < <(awk '/^cpu /{print $2+$3+$4+$6+$7+$8, $5}' /proc/stat)
+          elapsed=$(( $(date +%s) - $(cat /tmp/t0) ))
+          db=$((busy1 - busy0)); di=$((idle1 - idle0))
+          # Jiffies across every core, so this is already the whole-instance
+          # figure rather than a per-core one.
+          echo "cpu_busy_pct=$(awk -v b="$db" -v i="$di" 'BEGIN{printf "%.1f", (b+i)?100*b/(b+i):0}')"
+          echo "cpu_busy_vcpu_seconds=$(awk -v b="$db" 'BEGIN{printf "%.1f", b/100}')"
+          echo "wall_seconds=$elapsed"

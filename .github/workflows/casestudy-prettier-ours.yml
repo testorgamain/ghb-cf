@@ -1,0 +1,22 @@
+# Thin caller. Holds no measured steps: it exists only to pass a runner label
+# to the reusable workflow. GitHub-hosted (4 CPU / 16 GB, public repo).
+name: prettier (ours)
+
+on:
+  workflow_dispatch:
+    inputs:
+      cache:
+        description: cold (no dependency cache) or warm (cache enabled)
+        type: choice
+        options: [cold, warm]
+        default: cold
+
+permissions:
+  contents: read
+
+jobs:
+  case:
+    uses: ./.github/workflows/casestudy-prettier.yml
+    with:
+      runner: ci-metal-4
+      cache: ${{ inputs.cache }}

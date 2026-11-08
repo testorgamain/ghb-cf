@@ -1,0 +1,51 @@
+name: Fibonacci chain (cf)
+
+on:
+  workflow_dispatch:
+    inputs:
+      n:
+        description: 'Fibonacci index computed by this run'
+        required: false
+        default: '3'
+      a:
+        description: 'fib(n-2)'
+        required: false
+        default: '1'
+      b:
+        description: 'fib(n-1)'
+        required: false
+        default: '1'
+      depth:
+        description: 'Final fibonacci index to compute; the chain stops here'
+        required: false
+        default: '20'
+
+permissions:
+  actions: write
+
+jobs:
+  fib:
+    runs-on: cf-container
+    steps:
+      - name: Compute fib(n) and dispatch next run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          N: ${{ inputs.n }}
+          A: ${{ inputs.a }}
+          B: ${{ inputs.b }}
+          DEPTH: ${{ inputs.depth }}
+          WORKFLOW: fib-cf.yml
+        run: |
+          value=$((A + B))
+          echo "fib($N) = $value"
+          if [ "$N" -ge "$DEPTH" ]; then
+            echo "Done: fib($DEPTH) = $value"
+            exit 0
+          fi
+          curl -sfS -X POST \
+            -H "authorization: Bearer $GH_TOKEN" \
+            -H "accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/dispatches" \
+            -d "{\"ref\":\"$REF\",\"inputs\":{\"n\":\"$((N + 1))\",\"a\":\"$B\",\"b\":\"$value\",\"depth\":\"$DEPTH\"}}"
